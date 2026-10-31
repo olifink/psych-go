@@ -1,0 +1,282 @@
+package client
+
+import (
+	"crypto/cipher"
+	"crypto/ecdh"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"psych/internal/crypto"
+	"psych/internal/protocol"
+)
+
+var (
+	ErrHandshakeFailed = errors.New("peer handshake failed")
+	ErrSessionClosed   = errors.New("session closed")
+)
+
+// Client represents an authenticated, end-to-end encrypted peer connection.
+type Client struct {
+	conn       *websocket.Conn
+	writeMu    sync.Mutex
+	privKey    *ecdh.PrivateKey
+	pubKeyHex  string
+	peerPubHex string
+	role       crypto.Role
+	aead       cipher.AEAD
+	counter    *crypto.NonceCounter
+	validator  *crypto.NonceValidator
+	sid        string
+	relayURL   string
+	closed     chan struct{}
+	onceClose  sync.Once
+}
+
+// ConnectInitiator connects to the relay as the initiator, waiting for a joiner to arrive and send a handshake.
+func ConnectInitiator(relayURL string, sid string, privKey *ecdh.PrivateKey) (*Client, error) {
+	wsEndpoint, err := constructWSEndpoint(relayURL, sid)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to relay: %w", err)
+	}
+
+	c := &Client{
+		conn:      conn,
+		privKey:   privKey,
+		pubKeyHex: hex.EncodeToString(privKey.PublicKey().Bytes()),
+		role:      crypto.RoleInitiator,
+		sid:       sid,
+		relayURL:  relayURL,
+		counter:   crypto.NewNonceCounter(crypto.RoleInitiator),
+		validator: crypto.NewNonceValidator(crypto.RoleJoiner),
+		closed:    make(chan struct{}),
+	}
+
+	// Wait for joiner handshake message
+	if err := c.awaitJoinerHandshake(); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+
+	return c, nil
+}
+
+// ConnectJoiner connects to the relay as the joiner, sends its public key to the initiator, and derives the session key.
+func ConnectJoiner(relayURL string, sid string, initiatorPubHex string, privKey *ecdh.PrivateKey) (*Client, error) {
+	wsEndpoint, err := constructWSEndpoint(relayURL, sid)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to relay: %w", err)
+	}
+
+	c := &Client{
+		conn:       conn,
+		privKey:    privKey,
+		pubKeyHex:  hex.EncodeToString(privKey.PublicKey().Bytes()),
+		peerPubHex: strings.ToLower(initiatorPubHex),
+		role:       crypto.RoleJoiner,
+		sid:        sid,
+		relayURL:   relayURL,
+		counter:    crypto.NewNonceCounter(crypto.RoleJoiner),
+		validator:  crypto.NewNonceValidator(crypto.RoleInitiator),
+		closed:     make(chan struct{}),
+	}
+
+	// 1. Send handshake message to initiator
+	hs := protocol.NewHandshakeMessage(c.pubKeyHex)
+	hsBytes, err := json.Marshal(hs)
+	if err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+
+	c.writeMu.Lock()
+	err = c.conn.WriteMessage(websocket.TextMessage, hsBytes)
+	c.writeMu.Unlock()
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("failed to send handshake to initiator: %w", err)
+	}
+
+	// 2. Derive key from initiator's public key
+	peerPubBytes, err := hex.DecodeString(c.peerPubHex)
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("invalid initiator public key: %w", err)
+	}
+
+	secret, err := crypto.ComputeSharedSecret(c.privKey, peerPubBytes)
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("failed to compute shared secret: %w", err)
+	}
+
+	key, err := crypto.DeriveSessionKey(secret)
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("failed to derive session key: %w", err)
+	}
+
+	aead, err := crypto.NewAEAD(key)
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("failed to initialize AEAD cipher: %w", err)
+	}
+	c.aead = aead
+
+	return c, nil
+}
+
+func (c *Client) awaitJoinerHandshake() error {
+	// Loop until handshake received (skipping keepalives)
+	for {
+		msgType, data, err := c.conn.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("%w: read failed: %v", ErrHandshakeFailed, err)
+		}
+		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+			continue
+		}
+
+		var hs protocol.HandshakeMessage
+		if err := json.Unmarshal(data, &hs); err == nil && hs.Type == protocol.TypeHandshake {
+			c.peerPubHex = strings.ToLower(hs.Pub)
+			peerPubBytes, err := hex.DecodeString(c.peerPubHex)
+			if err != nil || len(peerPubBytes) != 32 {
+				return fmt.Errorf("%w: invalid peer public key in handshake", ErrHandshakeFailed)
+			}
+
+			secret, err := crypto.ComputeSharedSecret(c.privKey, peerPubBytes)
+			if err != nil {
+				return fmt.Errorf("%w: compute shared secret: %v", ErrHandshakeFailed, err)
+			}
+
+			key, err := crypto.DeriveSessionKey(secret)
+			if err != nil {
+				return fmt.Errorf("%w: derive session key: %v", ErrHandshakeFailed, err)
+			}
+
+			aead, err := crypto.NewAEAD(key)
+			if err != nil {
+				return fmt.Errorf("%w: new AEAD: %v", ErrHandshakeFailed, err)
+			}
+			c.aead = aead
+			return nil
+		}
+	}
+}
+
+// SendPayload encrypts and sends an InnerPayload through the wire envelope.
+func (c *Client) SendPayload(payload *protocol.InnerPayload) error {
+	if c.aead == nil {
+		return errors.New("client handshake not completed")
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to serialize payload: %w", err)
+	}
+
+	seq, nonce := c.counter.Next()
+	ciphertext := crypto.Encrypt(c.aead, nonce, payloadJSON)
+
+	envelope := protocol.NewWireEnvelope(seq, nonce, ciphertext)
+	envelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("failed to serialize envelope: %w", err)
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.WriteMessage(websocket.TextMessage, envelopeJSON)
+}
+
+// SendText sends a plain text message.
+func (c *Client) SendText(text string) error {
+	return c.SendPayload(protocol.NewTextMessage(text))
+}
+
+// ReadPayload reads and decrypts the next inner payload from the peer.
+func (c *Client) ReadPayload() (*protocol.InnerPayload, error) {
+	for {
+		select {
+		case <-c.closed:
+			return nil, ErrSessionClosed
+		default:
+		}
+
+		msgType, data, err := c.conn.ReadMessage()
+		if err != nil {
+			return nil, err
+		}
+		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+			continue
+		}
+
+		var env protocol.WireEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal wire envelope: %w", err)
+		}
+
+		nonce, ciphertext, err := env.DecodeComponents()
+		if err != nil {
+			return nil, err
+		}
+
+		// Validate nonce monotonically and check directional prefix
+		if err := c.validator.Validate(nonce, env.Seq); err != nil {
+			return nil, fmt.Errorf("nonce validation failed: %w", err)
+		}
+
+		plaintext, err := crypto.Decrypt(c.aead, nonce, ciphertext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt message: %w", err)
+		}
+
+		var payload protocol.InnerPayload
+		if err := json.Unmarshal(plaintext, &payload); err != nil {
+			return nil, fmt.Errorf("failed to parse decrypted inner payload: %w", err)
+		}
+
+		return &payload, nil
+	}
+}
+
+// Close gracefully closes the client connection.
+func (c *Client) Close() error {
+	var err error
+	c.onceClose.Do(func() {
+		close(c.closed)
+		c.writeMu.Lock()
+		_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		err = c.conn.Close()
+		c.writeMu.Unlock()
+	})
+	return err
+}
+
+func constructWSEndpoint(relayURL string, sid string) (string, error) {
+	u, err := url.Parse(relayURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid relay URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("sid", sid)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}

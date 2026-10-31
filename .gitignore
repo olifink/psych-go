@@ -1,0 +1,16 @@
+# Binaries
+/psych
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+/tmp/
+
+# OS / Editor files
+.DS_Store
+.idea/
+.vscode/
