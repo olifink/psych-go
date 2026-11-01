@@ -34,6 +34,10 @@ func StartInitiatorSession(relayURL string, in io.Reader, out io.Writer, errOut 
 	}
 	defer client.Close()
 
+	client.OnPeerConnected = func() {
+		fmt.Fprintln(errOut, "[+] New peer connected/paired! E2EE channel re-keyed.")
+	}
+
 	fmt.Fprintln(errOut, "[+] Peer paired successfully! Entering secure E2EE chat mode. (Ctrl+D to exit)")
 	return RunChat(client, in, out, errOut)
 }

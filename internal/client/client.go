@@ -24,19 +24,21 @@ var (
 
 // Client represents an authenticated, end-to-end encrypted peer connection.
 type Client struct {
-	conn       *websocket.Conn
-	writeMu    sync.Mutex
-	privKey    *ecdh.PrivateKey
-	pubKeyHex  string
-	peerPubHex string
-	role       crypto.Role
-	aead       cipher.AEAD
-	counter    *crypto.NonceCounter
-	validator  *crypto.NonceValidator
-	sid        string
-	relayURL   string
-	closed     chan struct{}
-	onceClose  sync.Once
+	conn            *websocket.Conn
+	writeMu         sync.Mutex
+	stateMu         sync.RWMutex
+	privKey         *ecdh.PrivateKey
+	pubKeyHex       string
+	peerPubHex      string
+	role            crypto.Role
+	aead            cipher.AEAD
+	counter         *crypto.NonceCounter
+	validator       *crypto.NonceValidator
+	sid             string
+	relayURL        string
+	closed          chan struct{}
+	onceClose       sync.Once
+	OnPeerConnected func()
 }
 
 // ConnectInitiator connects to the relay as the initiator, waiting for a joiner to arrive and send a handshake.
@@ -183,7 +185,12 @@ func (c *Client) awaitJoinerHandshake() error {
 
 // SendPayload encrypts and sends an InnerPayload through the wire envelope.
 func (c *Client) SendPayload(payload *protocol.InnerPayload) error {
-	if c.aead == nil {
+	c.stateMu.RLock()
+	aead := c.aead
+	counter := c.counter
+	c.stateMu.RUnlock()
+
+	if aead == nil {
 		return errors.New("client handshake not completed")
 	}
 
@@ -192,8 +199,8 @@ func (c *Client) SendPayload(payload *protocol.InnerPayload) error {
 		return fmt.Errorf("failed to serialize payload: %w", err)
 	}
 
-	seq, nonce := c.counter.Next()
-	ciphertext := crypto.Encrypt(c.aead, nonce, payloadJSON)
+	seq, nonce := counter.Next()
+	ciphertext := crypto.Encrypt(aead, nonce, payloadJSON)
 
 	envelope := protocol.NewWireEnvelope(seq, nonce, ciphertext)
 	envelopeJSON, err := json.Marshal(envelope)
@@ -228,6 +235,41 @@ func (c *Client) ReadPayload() (*protocol.InnerPayload, error) {
 			continue
 		}
 
+		// Handle incoming handshake frames from reconnecting or new peers
+		if protocol.IsHandshakeFrame(data) {
+			var hs protocol.HandshakeMessage
+			if err := json.Unmarshal(data, &hs); err == nil && hs.Type == protocol.TypeHandshake {
+				peerPubBytes, err := hex.DecodeString(strings.ToLower(hs.Pub))
+				if err == nil && len(peerPubBytes) == 32 {
+					secret, err := crypto.ComputeSharedSecret(c.privKey, peerPubBytes)
+					if err == nil {
+						key, err := crypto.DeriveSessionKey(secret)
+						if err == nil {
+							newAEAD, err := crypto.NewAEAD(key)
+							if err == nil {
+								c.stateMu.Lock()
+								c.peerPubHex = strings.ToLower(hs.Pub)
+								c.aead = newAEAD
+								c.counter = crypto.NewNonceCounter(c.role)
+								expectedPeerRole := crypto.RoleJoiner
+								if c.role == crypto.RoleJoiner {
+									expectedPeerRole = crypto.RoleInitiator
+								}
+								c.validator = crypto.NewNonceValidator(expectedPeerRole)
+								c.stateMu.Unlock()
+
+								if c.OnPeerConnected != nil {
+									c.OnPeerConnected()
+								}
+								// Handshake processed, continue loop to read subsequent data frame
+								continue
+							}
+						}
+					}
+				}
+			}
+		}
+
 		var env protocol.WireEnvelope
 		if err := json.Unmarshal(data, &env); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal wire envelope: %w", err)
@@ -238,12 +280,17 @@ func (c *Client) ReadPayload() (*protocol.InnerPayload, error) {
 			return nil, err
 		}
 
+		c.stateMu.RLock()
+		validator := c.validator
+		aead := c.aead
+		c.stateMu.RUnlock()
+
 		// Validate nonce monotonically and check directional prefix
-		if err := c.validator.Validate(nonce, env.Seq); err != nil {
+		if err := validator.Validate(nonce, env.Seq); err != nil {
 			return nil, fmt.Errorf("nonce validation failed: %w", err)
 		}
 
-		plaintext, err := crypto.Decrypt(c.aead, nonce, ciphertext)
+		plaintext, err := crypto.Decrypt(aead, nonce, ciphertext)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt message: %w", err)
 		}

@@ -167,7 +167,7 @@ func TestE2EOneShotPiping(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		content := errBuf.String()
 		if idx := strings.Index(content, "psych://pair?"); idx != -1 {
-			endIdx := strings.IndexAny(content[idx:], " \r\n\t")
+			endIdx := strings.IndexAny(content[idx:], " \r\n\t'\"")
 			if endIdx != -1 {
 				uri = content[idx : idx+endIdx]
 			} else {
@@ -200,5 +200,81 @@ func TestE2EOneShotPiping(t *testing.T) {
 	// Verify exact plaintext received on stdout buffer
 	if outBuf.String() != secretPayload {
 		t.Fatalf("received stdout mismatch: got %q, want %q", outBuf.String(), secretPayload)
+	}
+}
+
+// TestE2EReconnectMultipleJoiners tests whether an initiator session accepts a new joiner
+// after the previous joiner/sender disconnects.
+func TestE2EReconnectMultipleJoiners(t *testing.T) {
+	relayServer := relay.NewServer()
+	httpSrv := httptest.NewServer(relayServer.Handler())
+	defer httpSrv.Close()
+
+	relayURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/ws"
+
+	sid, _ := crypto.GenerateSessionID()
+	initiatorPriv, _ := crypto.GenerateKeyPair()
+	initiatorPubHex := hex.EncodeToString(initiatorPriv.PublicKey().Bytes())
+
+	initErrCh := make(chan error, 1)
+	var initClient *client.Client
+
+	go func() {
+		var err error
+		initClient, err = client.ConnectInitiator(relayURL, sid, initiatorPriv)
+		initErrCh <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Joiner 1 connects
+	j1Priv, _ := crypto.GenerateKeyPair()
+	j1Client, err := client.ConnectJoiner(relayURL, sid, initiatorPubHex, j1Priv)
+	if err != nil {
+		t.Fatalf("Joiner 1 connect failed: %v", err)
+	}
+
+	if err := <-initErrCh; err != nil {
+		t.Fatalf("Init connect failed: %v", err)
+	}
+
+	// Joiner 1 sends message
+	msg1 := "First message from Joiner 1"
+	if err := j1Client.SendText(msg1); err != nil {
+		t.Fatalf("Joiner 1 SendText failed: %v", err)
+	}
+
+	p1, err := initClient.ReadPayload()
+	if err != nil {
+		t.Fatalf("Initiator read payload 1 failed: %v", err)
+	}
+	if p1.Body != msg1 {
+		t.Fatalf("Payload 1 mismatch: got %q, want %q", p1.Body, msg1)
+	}
+
+	// Joiner 1 disconnects
+	_ = j1Client.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Joiner 2 connects to the SAME session!
+	j2Priv, _ := crypto.GenerateKeyPair()
+	j2Client, err := client.ConnectJoiner(relayURL, sid, initiatorPubHex, j2Priv)
+	if err != nil {
+		t.Fatalf("Joiner 2 connect failed: %v", err)
+	}
+	defer j2Client.Close()
+
+	// Joiner 2 sends message
+	msg2 := "Second message from Joiner 2"
+	if err := j2Client.SendText(msg2); err != nil {
+		t.Fatalf("Joiner 2 SendText failed: %v", err)
+	}
+
+	p2, err := initClient.ReadPayload()
+	if err != nil {
+		t.Fatalf("Initiator read payload 2 failed: %v", err)
+	}
+	if p2.Body != msg2 {
+		t.Fatalf("Payload 2 mismatch: got %q, want %q", p2.Body, msg2)
 	}
 }

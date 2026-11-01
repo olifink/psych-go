@@ -91,7 +91,8 @@ func PrintPairingPrompt(w io.Writer, uri string) {
 	fmt.Fprintln(w)
 	_ = RenderQRCodeHalfBlock(w, uri)
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Or pair manually with this URI:")
-	fmt.Fprintf(w, "  %s\n\n", uri)
+	fmt.Fprintln(w, "Or pair manually from terminal (single quotes required to prevent shell '&' splitting):")
+	fmt.Fprintf(w, "  psych join '%s'\n\n", uri)
+	fmt.Fprintf(w, "Raw URI:\n  %s\n\n", uri)
 	fmt.Fprintln(w, "Waiting for peer to connect...")
 }

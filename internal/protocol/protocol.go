@@ -71,21 +71,29 @@ func ParsePairingURI(rawURI string) (*PairingInfo, error) {
 
 	q := u.Query()
 	v := q.Get("v")
+	sid := strings.ToLower(q.Get("sid"))
+	relayURL := q.Get("relay")
+	pub := strings.ToLower(q.Get("pub"))
+
+	// Detect if parameters were truncated because of unquoted '&' in shell
+	if v == "" || sid == "" || relayURL == "" || pub == "" {
+		if !strings.Contains(rawURI, "&") {
+			return nil, fmt.Errorf("%w: URI appears truncated. In bash/zsh, unquoted '&' runs commands in the background. Enclose the URI in quotes:\n  psych join '%s'", ErrInvalidPairingURI, rawURI)
+		}
+	}
+
 	if v != ProtocolVersion {
 		return nil, fmt.Errorf("%w: got %q, expected %q", ErrUnsupportedVersion, v, ProtocolVersion)
 	}
 
-	sid := strings.ToLower(q.Get("sid"))
 	if err := ValidateSessionID(sid); err != nil {
 		return nil, err
 	}
 
-	relayURL := q.Get("relay")
 	if relayURL == "" {
 		return nil, ErrMissingRelayEndpoint
 	}
 
-	pub := strings.ToLower(q.Get("pub"))
 	if err := ValidatePublicKeyHex(pub); err != nil {
 		return nil, err
 	}
@@ -101,6 +109,7 @@ func ParsePairingURI(rawURI string) (*PairingInfo, error) {
 // ResolvePairingTarget parses either a full pairing URI or a raw session ID with flag fallbacks.
 func ResolvePairingTarget(target string, defaultRelay string, pubFlag string) (*PairingInfo, error) {
 	trimmed := strings.TrimSpace(target)
+	trimmed = strings.Trim(trimmed, "'\"")
 	if strings.HasPrefix(trimmed, "psych://") || strings.HasPrefix(trimmed, "psych:") {
 		info, err := ParsePairingURI(trimmed)
 		if err != nil {
