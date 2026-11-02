@@ -85,13 +85,36 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# Resolve GitHub authorization token if available (for private repos)
+resolve_auth() {
+  AUTH_TOKEN=""
+  if [ -n "$GITHUB_TOKEN" ]; then
+    AUTH_TOKEN="$GITHUB_TOKEN"
+  elif [ -n "$GH_TOKEN" ]; then
+    AUTH_TOKEN="$GH_TOKEN"
+  elif has_cmd gh; then
+    AUTH_TOKEN=$(gh auth token 2>/dev/null || true)
+  fi
+}
+
 download_file() {
   url="$1"
   output="$2"
+  auth_header=""
+  [ -n "$AUTH_TOKEN" ] && auth_header="Authorization: Bearer $AUTH_TOKEN"
+
   if has_cmd curl; then
-    curl -fsSL "$url" -o "$output"
+    if [ -n "$auth_header" ]; then
+      curl -fsSL -H "$auth_header" "$url" -o "$output"
+    else
+      curl -fsSL "$url" -o "$output"
+    fi
   elif has_cmd wget; then
-    wget -qO "$output" "$url"
+    if [ -n "$auth_header" ]; then
+      wget --header="$auth_header" -qO "$output" "$url"
+    else
+      wget -qO "$output" "$url"
+    fi
   else
     log_error "Neither curl nor wget is available. Please install one of them."
     exit 1
@@ -100,10 +123,21 @@ download_file() {
 
 fetch_text() {
   url="$1"
+  auth_header=""
+  [ -n "$AUTH_TOKEN" ] && auth_header="Authorization: Bearer $AUTH_TOKEN"
+
   if has_cmd curl; then
-    curl -fsSL "$url"
+    if [ -n "$auth_header" ]; then
+      curl -fsSL -H "$auth_header" "$url"
+    else
+      curl -fsSL "$url"
+    fi
   elif has_cmd wget; then
-    wget -qO- "$url"
+    if [ -n "$auth_header" ]; then
+      wget --header="$auth_header" -qO- "$url"
+    else
+      wget -qO- "$url"
+    fi
   else
     log_error "Neither curl nor wget is available."
     exit 1
@@ -124,10 +158,15 @@ resolve_version() {
 
   log_info "Finding latest release of ${GITHUB_REPO}..."
 
-  # Attempt 1: GitHub API
-  TAG=$(fetch_text "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+  # Attempt 1: GitHub API (works with or without AUTH_TOKEN)
+  TAG=$(fetch_text "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
 
-  # Attempt 2: HTTP redirect header
+  # Attempt 2: gh CLI
+  if [ -z "$TAG" ] && has_cmd gh; then
+    TAG=$(gh release view --repo "${GITHUB_REPO}" --json tagName -q .tagName 2>/dev/null || true)
+  fi
+
+  # Attempt 3: HTTP redirect header (public repos)
   if [ -z "$TAG" ]; then
     if has_cmd curl; then
       REDIRECT_URL=$(curl -fsSI -o /dev/null -w "%{url_effective}" "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null || true)
@@ -137,6 +176,9 @@ resolve_version() {
 
   if [ -z "$TAG" ] || [ "$TAG" = "latest" ]; then
     log_error "Failed to resolve latest release tag from GitHub. Specify a version manually: VERSION=v1.0.0 $0"
+    if [ -z "$AUTH_TOKEN" ]; then
+      log_warn "If ${GITHUB_REPO} is private, export GITHUB_TOKEN or authenticate via 'gh auth login'."
+    fi
     exit 1
   fi
 
@@ -194,13 +236,15 @@ verify_checksum() {
     exit 1
   fi
 
-  log_info "Checksum verified (${actual_hash:0:16}...)"
+  short_hash=$(printf "%s" "$actual_hash" | cut -c 1-16)
+  log_info "Checksum verified (${short_hash}...)"
 }
 
 main() {
   setup_colors
   detect_os
   detect_arch
+  resolve_auth
   resolve_version
   resolve_bindir
 
@@ -213,14 +257,23 @@ main() {
   TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'psych-install')
   trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
-  log_info "Downloading ${DOWNLOAD_URL}..."
-  if ! download_file "$DOWNLOAD_URL" "$TMPDIR/$ARCHIVE_NAME"; then
-    log_error "Failed to download release archive from ${DOWNLOAD_URL}"
-    exit 1
+  DOWNLOAD_SUCCESS=0
+  if has_cmd gh && [ -n "$AUTH_TOKEN" ]; then
+    log_info "Downloading release assets via GitHub CLI..."
+    if gh release download "$TAG" -p "$ARCHIVE_NAME" -p "checksums.txt" -D "$TMPDIR" --repo "$GITHUB_REPO" 2>/dev/null; then
+      DOWNLOAD_SUCCESS=1
+    fi
   fi
 
-  # Download checksums
-  download_file "$CHECKSUM_URL" "$TMPDIR/checksums.txt" 2>/dev/null || true
+  if [ "$DOWNLOAD_SUCCESS" -eq 0 ]; then
+    log_info "Downloading ${DOWNLOAD_URL}..."
+    if ! download_file "$DOWNLOAD_URL" "$TMPDIR/$ARCHIVE_NAME"; then
+      log_error "Failed to download release archive from ${DOWNLOAD_URL}"
+      exit 1
+    fi
+    # Download checksums
+    download_file "$CHECKSUM_URL" "$TMPDIR/checksums.txt" 2>/dev/null || true
+  fi
   verify_checksum "$TMPDIR/$ARCHIVE_NAME" "$ARCHIVE_NAME" "$TMPDIR/checksums.txt"
 
   # Extract binary
