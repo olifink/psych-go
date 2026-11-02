@@ -34,6 +34,10 @@ jobs:
         run: |
           go test -v ./...
 
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y zip
+
       - name: Build release binaries and packages
         id: build
         run: |
@@ -47,7 +51,8 @@ jobs:
           VERSION="${TAG#v}"
           echo "Building release for version: ${VERSION} (tag: ${TAG})"
 
-          mkdir -p dist
+          DIST_DIR="$(pwd)/dist"
+          mkdir -p "${DIST_DIR}"
 
           PLATFORMS=(
             "linux/amd64"
@@ -86,15 +91,15 @@ jobs:
 
             ARCHIVE_BASE="psych_${VERSION}_${GOOS}_${ARCH_NAME}"
             if [ "${PKG_EXT}" = "tar.gz" ]; then
-              tar -czf "dist/${ARCHIVE_BASE}.tar.gz" -C "${OUTPUT_DIR}" .
+              tar -czf "${DIST_DIR}/${ARCHIVE_BASE}.tar.gz" -C "${OUTPUT_DIR}" .
             else
-              (cd "${OUTPUT_DIR}" && zip -qr "../../dist/${ARCHIVE_BASE}.zip" .)
+              (cd "${OUTPUT_DIR}" && zip -qr "${DIST_DIR}/${ARCHIVE_BASE}.zip" .)
             fi
 
             rm -rf "${OUTPUT_DIR}"
           done
 
-          cd dist
+          cd "${DIST_DIR}"
           sha256sum * > checksums.txt
           echo "Generated checksums:"
           cat checksums.txt
