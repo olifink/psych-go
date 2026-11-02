@@ -14,10 +14,11 @@ import (
 
 // StartInitiatorSession runs an interactive initiator session.
 func StartInitiatorSession(relayURL string, in io.Reader, out io.Writer, errOut io.Writer) error {
-	sid, err := crypto.GenerateSessionID()
+	code, err := crypto.GeneratePairingCode()
 	if err != nil {
-		return fmt.Errorf("failed to generate session ID: %w", err)
+		return fmt.Errorf("failed to generate pairing code: %w", err)
 	}
+	sid := crypto.DeriveSessionIDFromCode(code)
 
 	privKey, err := crypto.GenerateKeyPair()
 	if err != nil {
@@ -25,10 +26,10 @@ func StartInitiatorSession(relayURL string, in io.Reader, out io.Writer, errOut 
 	}
 	pubHex := hex.EncodeToString(privKey.PublicKey().Bytes())
 
-	uri := protocol.BuildPairingURI(sid, relayURL, pubHex)
-	terminal.PrintPairingPrompt(errOut, uri)
+	uri := protocol.BuildPairingURI(sid, relayURL, pubHex, code)
+	terminal.PrintPairingPrompt(errOut, uri, code)
 
-	client, err := ConnectInitiator(relayURL, sid, privKey)
+	client, err := ConnectInitiator(relayURL, sid, privKey, code)
 	if err != nil {
 		return fmt.Errorf("initiator connection error: %w", err)
 	}
@@ -49,16 +50,24 @@ func StartJoinerSession(pairingTarget string, defaultRelay string, pubFlag strin
 		return err
 	}
 
-	privKey, err := crypto.GenerateKeyPair()
-	if err != nil {
-		return fmt.Errorf("failed to generate keypair: %w", err)
-	}
+	var client *Client
+	if info.Code != "" {
+		fmt.Fprintf(errOut, "Pairing via code %s on relay %s...\n", info.Code, info.RelayURL)
+		client, err = ConnectJoinerWithCode(info.RelayURL, info.SessionID, info.Code)
+		if err != nil {
+			return fmt.Errorf("code pairing failed: %w", err)
+		}
+	} else {
+		privKey, err := crypto.GenerateKeyPair()
+		if err != nil {
+			return fmt.Errorf("failed to generate keypair: %w", err)
+		}
 
-	fmt.Fprintf(errOut, "Connecting to relay %s for session %s...\n", info.RelayURL, info.SessionID)
-
-	client, err := ConnectJoiner(info.RelayURL, info.SessionID, info.InitiatorPub, privKey)
-	if err != nil {
-		return fmt.Errorf("joiner connection error: %w", err)
+		fmt.Fprintf(errOut, "Connecting to relay %s for session %s...\n", info.RelayURL, info.SessionID)
+		client, err = ConnectJoiner(info.RelayURL, info.SessionID, info.InitiatorPub, privKey)
+		if err != nil {
+			return fmt.Errorf("joiner connection error: %w", err)
+		}
 	}
 	defer client.Close()
 
@@ -78,14 +87,22 @@ func RunSend(pairingTarget string, defaultRelay string, pubFlag string, in io.Re
 		return fmt.Errorf("failed to read from input: %w", err)
 	}
 
-	privKey, err := crypto.GenerateKeyPair()
-	if err != nil {
-		return fmt.Errorf("failed to generate keypair: %w", err)
-	}
+	var client *Client
+	if info.Code != "" {
+		client, err = ConnectJoinerWithCode(info.RelayURL, info.SessionID, info.Code)
+		if err != nil {
+			return fmt.Errorf("send code pairing failed: %w", err)
+		}
+	} else {
+		privKey, err := crypto.GenerateKeyPair()
+		if err != nil {
+			return fmt.Errorf("failed to generate keypair: %w", err)
+		}
 
-	client, err := ConnectJoiner(info.RelayURL, info.SessionID, info.InitiatorPub, privKey)
-	if err != nil {
-		return fmt.Errorf("send connection error: %w", err)
+		client, err = ConnectJoiner(info.RelayURL, info.SessionID, info.InitiatorPub, privKey)
+		if err != nil {
+			return fmt.Errorf("send connection error: %w", err)
+		}
 	}
 	defer client.Close()
 
@@ -100,10 +117,11 @@ func RunSend(pairingTarget string, defaultRelay string, pubFlag string, in io.Re
 
 // RunRecv implements the one-shot scripting receiver mode.
 func RunRecv(relayURL string, out io.Writer, errOut io.Writer) error {
-	sid, err := crypto.GenerateSessionID()
+	code, err := crypto.GeneratePairingCode()
 	if err != nil {
-		return fmt.Errorf("failed to generate session ID: %w", err)
+		return fmt.Errorf("failed to generate pairing code: %w", err)
 	}
+	sid := crypto.DeriveSessionIDFromCode(code)
 
 	privKey, err := crypto.GenerateKeyPair()
 	if err != nil {
@@ -111,10 +129,10 @@ func RunRecv(relayURL string, out io.Writer, errOut io.Writer) error {
 	}
 	pubHex := hex.EncodeToString(privKey.PublicKey().Bytes())
 
-	uri := protocol.BuildPairingURI(sid, relayURL, pubHex)
-	terminal.PrintPairingPrompt(errOut, uri)
+	uri := protocol.BuildPairingURI(sid, relayURL, pubHex, code)
+	terminal.PrintPairingPrompt(errOut, uri, code)
 
-	client, err := ConnectInitiator(relayURL, sid, privKey)
+	client, err := ConnectInitiator(relayURL, sid, privKey, code)
 	if err != nil {
 		return fmt.Errorf("recv connection error: %w", err)
 	}

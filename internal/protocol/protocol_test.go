@@ -133,3 +133,61 @@ func TestInnerPayloads(t *testing.T) {
 		t.Fatalf("invalid file payload: %+v", f)
 	}
 }
+
+func TestResolvePairingTargetWithCode(t *testing.T) {
+	relay := "ws://localhost:8080/ws"
+
+	// 8-character Crockford code
+	info, err := ResolvePairingTarget("7K4M-9P2X", relay, "")
+	if err != nil {
+		t.Fatalf("resolve target with code failed: %v", err)
+	}
+	if info.Code != "7K4M9P2X" {
+		t.Errorf("expected code 7K4M9P2X, got %s", info.Code)
+	}
+	if len(info.SessionID) != 32 {
+		t.Errorf("expected 32 hex chars session ID, got %s", info.SessionID)
+	}
+	if info.RelayURL != relay {
+		t.Errorf("relay mismatch: got %s, want %s", info.RelayURL, relay)
+	}
+
+	// URI with code parameter
+	sid := "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	uriWithCode := BuildPairingURI(sid, relay, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "7K4M-9P2X")
+	parsed, err := ParsePairingURI(uriWithCode)
+	if err != nil {
+		t.Fatalf("parse URI with code failed: %v", err)
+	}
+	if parsed.Code != "7K4M9P2X" {
+		t.Errorf("expected parsed code 7K4M9P2X, got %s", parsed.Code)
+	}
+}
+
+func TestPAKEFrames(t *testing.T) {
+	raw := []byte("pake-point-bytes")
+	initMsg := NewPAKEInitMessage(raw)
+	initData, _ := json.Marshal(initMsg)
+
+	if !IsPAKEInitFrame(initData) {
+		t.Fatal("expected IsPAKEInitFrame to return true")
+	}
+	if IsPAKEReplyFrame(initData) {
+		t.Fatal("expected IsPAKEReplyFrame to return false for init frame")
+	}
+
+	replyMsg := NewPAKEReplyMessage(raw)
+	replyData, _ := json.Marshal(replyMsg)
+
+	if !IsPAKEReplyFrame(replyData) {
+		t.Fatal("expected IsPAKEReplyFrame to return true")
+	}
+	if IsPAKEInitFrame(replyData) {
+		t.Fatal("expected IsPAKEInitFrame to return false for reply frame")
+	}
+
+	decoded, err := replyMsg.DecodeData()
+	if err != nil || string(decoded) != string(raw) {
+		t.Fatalf("decoded PAKE data mismatch: got %q, want %q", decoded, raw)
+	}
+}

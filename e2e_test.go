@@ -278,3 +278,133 @@ func TestE2EReconnectMultipleJoiners(t *testing.T) {
 		t.Fatalf("Payload 2 mismatch: got %q, want %q", p2.Body, msg2)
 	}
 }
+
+// TestE2EShortCodePairing verifies pairing and E2EE communication using an 8-character code.
+func TestE2EShortCodePairing(t *testing.T) {
+	relayServer := relay.NewServer()
+	httpSrv := httptest.NewServer(relayServer.Handler())
+	defer httpSrv.Close()
+
+	relayURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/ws"
+
+	code := "7K4M-9P2X"
+	sid := crypto.DeriveSessionIDFromCode(code)
+
+	initiatorPriv, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate initiator keypair: %v", err)
+	}
+
+	initDone := make(chan error, 1)
+	var initClient *client.Client
+
+	// Initiator connects with code
+	go func() {
+		var err error
+		initClient, err = client.ConnectInitiator(relayURL, sid, initiatorPriv, code)
+		initDone <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Joiner connects with code only
+	joinClient, err := client.ConnectJoinerWithCode(relayURL, sid, code)
+	if err != nil {
+		t.Fatalf("joiner connect with code failed: %v", err)
+	}
+	defer joinClient.Close()
+
+	if err := <-initDone; err != nil {
+		t.Fatalf("initiator connect with code failed: %v", err)
+	}
+	defer initClient.Close()
+
+	// Bidirectional communication over PAKE-derived session key
+	msgFromJoiner := "Hello Initiator via 8-char PAKE code!"
+	if err := joinClient.SendText(msgFromJoiner); err != nil {
+		t.Fatalf("joiner send failed: %v", err)
+	}
+
+	gotInit, err := initClient.ReadPayload()
+	if err != nil {
+		t.Fatalf("initiator read failed: %v", err)
+	}
+	if gotInit.Body != msgFromJoiner {
+		t.Fatalf("initiator got %q, want %q", gotInit.Body, msgFromJoiner)
+	}
+
+	msgFromInit := "Hello Joiner, zero-knowledge PAKE channel verified!"
+	if err := initClient.SendText(msgFromInit); err != nil {
+		t.Fatalf("initiator send failed: %v", err)
+	}
+
+	gotJoin, err := joinClient.ReadPayload()
+	if err != nil {
+		t.Fatalf("joiner read failed: %v", err)
+	}
+	if gotJoin.Body != msgFromInit {
+		t.Fatalf("joiner got %q, want %q", gotJoin.Body, msgFromInit)
+	}
+}
+
+// TestE2EShortCodePipe verifies one-shot send and recv piping using an 8-character code.
+func TestE2EShortCodePipe(t *testing.T) {
+	relayServer := relay.NewServer()
+	httpSrv := httptest.NewServer(relayServer.Handler())
+	defer httpSrv.Close()
+
+	relayURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/ws"
+
+	secretPayload := "TOP_SECRET_CODE_PIPED_TOKEN\n"
+
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+
+	recvDone := make(chan error, 1)
+
+	// Run receiver
+	go func() {
+		recvDone <- client.RunRecv(relayURL, &outBuf, &errBuf)
+	}()
+
+	// Wait until pairing code is output to errBuf
+	var code string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		content := errBuf.String()
+		if idx := strings.Index(content, "psych join "); idx != -1 {
+			tail := content[idx+len("psych join "):]
+			fields := strings.Fields(tail)
+			if len(fields) > 0 {
+				candidate := strings.Trim(fields[0], "'\"\r\n")
+				if crypto.IsPairingCode(candidate) {
+					code = candidate
+					break
+				}
+			}
+		}
+	}
+
+	if code == "" {
+		t.Fatalf("timed out waiting for receiver code. Output:\n%s", errBuf.String())
+	}
+
+	// Sender sends via the 8-character code
+	inBuf := bytes.NewBufferString(secretPayload)
+	if err := client.RunSend(code, relayURL, "", inBuf); err != nil {
+		t.Fatalf("RunSend with code failed: %v", err)
+	}
+
+	select {
+	case err := <-recvDone:
+		if err != nil {
+			t.Fatalf("RunRecv failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for RunRecv to finish")
+	}
+
+	if outBuf.String() != secretPayload {
+		t.Fatalf("stdout mismatch: got %q, want %q", outBuf.String(), secretPayload)
+	}
+}

@@ -225,3 +225,104 @@ func TestSessionIDGeneration(t *testing.T) {
 		t.Fatalf("raw sid length is %d, expected 16 bytes", len(raw))
 	}
 }
+
+// TestPairingCodeGenerationAndNormalization verifies code generation and normalization.
+func TestPairingCodeGenerationAndNormalization(t *testing.T) {
+	code, err := GeneratePairingCode()
+	if err != nil {
+		t.Fatalf("failed to generate pairing code: %v", err)
+	}
+	if len(code) != 9 || code[4] != '-' {
+		t.Fatalf("unexpected code format: %q", code)
+	}
+
+	if !IsPairingCode(code) {
+		t.Fatalf("expected code %q to be valid", code)
+	}
+
+	norm := NormalizePairingCode(code)
+	if len(norm) != 8 {
+		t.Fatalf("normalized code length: got %d, want 8", len(norm))
+	}
+	if !IsPairingCode(norm) {
+		t.Fatalf("expected normalized code %q to be valid", norm)
+	}
+
+	// Test case-insensitivity and Crockford substitutions
+	testCases := []struct {
+		input    string
+		expected string
+		valid    bool
+	}{
+		{"7k4m-9p2x", "7K4M9P2X", true},
+		{"7K4M9P2X", "7K4M9P2X", true},
+		{"7k4m 9p2x", "7K4M9P2X", true},
+		{"O1IL-9P2X", "01119P2X", true}, // O->0, I->1, L->1
+		{"short", "", false},
+		{"toolongcode123", "", false},
+	}
+
+	for _, tc := range testCases {
+		if tc.valid {
+			if !IsPairingCode(tc.input) {
+				t.Errorf("expected %q to be recognized as valid code", tc.input)
+			}
+			got := NormalizePairingCode(tc.input)
+			if got != tc.expected {
+				t.Errorf("NormalizePairingCode(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		} else {
+			if IsPairingCode(tc.input) {
+				t.Errorf("expected %q to be recognized as invalid code", tc.input)
+			}
+		}
+	}
+
+	// Test deterministic SID derivation
+	sid1 := DeriveSessionIDFromCode("7K4M-9P2X")
+	sid2 := DeriveSessionIDFromCode("7k4m9p2x")
+	if sid1 != sid2 {
+		t.Fatalf("deterministic SIDs do not match: %s != %s", sid1, sid2)
+	}
+	if len(sid1) != 32 {
+		t.Fatalf("derived SID length: got %d, want 32", len(sid1))
+	}
+}
+
+// TestPAKEKeyDerivation verifies that both peers compute identical session keys with matching codes,
+// and different keys with mismatched codes.
+func TestPAKEKeyDerivation(t *testing.T) {
+	code := "7K4M-9P2X"
+
+	// 1. Joiner initializes PAKE
+	joinerPake, joinerMsg, err := PAKEJoinerInit(code)
+	if err != nil {
+		t.Fatalf("PAKEJoinerInit failed: %v", err)
+	}
+
+	// 2. Initiator responds
+	initiatorReply, initiatorKey, err := PAKEInitiatorRespond(code, joinerMsg)
+	if err != nil {
+		t.Fatalf("PAKEInitiatorRespond failed: %v", err)
+	}
+
+	// 3. Joiner finalizes
+	joinerKey, err := PAKEJoinerFinalize(joinerPake, initiatorReply)
+	if err != nil {
+		t.Fatalf("PAKEJoinerFinalize failed: %v", err)
+	}
+
+	if !bytes.Equal(initiatorKey, joinerKey) {
+		t.Fatalf("PAKE derived keys mismatch: initiator=%x joiner=%x", initiatorKey, joinerKey)
+	}
+	if len(initiatorKey) != 32 {
+		t.Fatalf("PAKE key length: got %d, want 32", len(initiatorKey))
+	}
+
+	// 4. Test with mismatched code: keys must NOT match
+	wrongCode := "W999-XXXX"
+	_, wrongKey, err := PAKEInitiatorRespond(wrongCode, joinerMsg)
+	if err == nil && bytes.Equal(wrongKey, joinerKey) {
+		t.Fatal("expected different keys with mismatched code, but got identical keys")
+	}
+}

@@ -35,6 +35,7 @@ type Client struct {
 	counter         *crypto.NonceCounter
 	validator       *crypto.NonceValidator
 	sid             string
+	code            string
 	relayURL        string
 	closed          chan struct{}
 	onceClose       sync.Once
@@ -42,7 +43,7 @@ type Client struct {
 }
 
 // ConnectInitiator connects to the relay as the initiator, waiting for a joiner to arrive and send a handshake.
-func ConnectInitiator(relayURL string, sid string, privKey *ecdh.PrivateKey) (*Client, error) {
+func ConnectInitiator(relayURL string, sid string, privKey *ecdh.PrivateKey, code ...string) (*Client, error) {
 	wsEndpoint, err := constructWSEndpoint(relayURL, sid)
 	if err != nil {
 		return nil, err
@@ -64,6 +65,9 @@ func ConnectInitiator(relayURL string, sid string, privKey *ecdh.PrivateKey) (*C
 		validator: crypto.NewNonceValidator(crypto.RoleJoiner),
 		closed:    make(chan struct{}),
 	}
+	if len(code) > 0 {
+		c.code = crypto.NormalizePairingCode(code[0])
+	}
 
 	// Wait for joiner handshake message
 	if err := c.awaitJoinerHandshake(); err != nil {
@@ -72,6 +76,92 @@ func ConnectInitiator(relayURL string, sid string, privKey *ecdh.PrivateKey) (*C
 	}
 
 	return c, nil
+}
+
+// ConnectJoinerWithCode connects to the relay using a short pairing code, performing PAKE key agreement.
+func ConnectJoinerWithCode(relayURL string, sid string, code string) (*Client, error) {
+	wsEndpoint, err := constructWSEndpoint(relayURL, sid)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to relay: %w", err)
+	}
+
+	normCode := crypto.NormalizePairingCode(code)
+	c := &Client{
+		conn:      conn,
+		role:      crypto.RoleJoiner,
+		sid:       sid,
+		code:      normCode,
+		relayURL:  relayURL,
+		counter:   crypto.NewNonceCounter(crypto.RoleJoiner),
+		validator: crypto.NewNonceValidator(crypto.RoleInitiator),
+		closed:    make(chan struct{}),
+	}
+
+	// 1. Initialize PAKE Joiner and generate pake_init frame
+	pakeInstance, initBytes, err := crypto.PAKEJoinerInit(normCode)
+	if err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+
+	initMsg := protocol.NewPAKEInitMessage(initBytes)
+	initJSON, err := json.Marshal(initMsg)
+	if err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+
+	c.writeMu.Lock()
+	err = c.conn.WriteMessage(websocket.TextMessage, initJSON)
+	c.writeMu.Unlock()
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("failed to send PAKE init: %w", err)
+	}
+
+	// 2. Await pake_reply from Initiator
+	for {
+		msgType, data, err := c.conn.ReadMessage()
+		if err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("read PAKE reply failed: %w", err)
+		}
+		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+			continue
+		}
+
+		if protocol.IsPAKEReplyFrame(data) {
+			var replyMsg protocol.PAKEMessage
+			if err := json.Unmarshal(data, &replyMsg); err != nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("failed to unmarshal PAKE reply: %w", err)
+			}
+			replyBytes, err := replyMsg.DecodeData()
+			if err != nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("failed to decode PAKE reply data: %w", err)
+			}
+
+			key, err := crypto.PAKEJoinerFinalize(pakeInstance, replyBytes)
+			if err != nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("PAKE key finalization failed: %w", err)
+			}
+
+			aead, err := crypto.NewAEAD(key)
+			if err != nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("failed to initialize AEAD cipher: %w", err)
+			}
+			c.aead = aead
+			return c, nil
+		}
+	}
 }
 
 // ConnectJoiner connects to the relay as the joiner, sends its public key to the initiator, and derives the session key.
@@ -180,6 +270,33 @@ func (c *Client) awaitJoinerHandshake() error {
 			c.aead = aead
 			return nil
 		}
+
+		if protocol.IsPAKEInitFrame(data) {
+			var pm protocol.PAKEMessage
+			if err := json.Unmarshal(data, &pm); err == nil && c.code != "" {
+				initBytes, err := pm.DecodeData()
+				if err == nil {
+					replyBytes, key, err := crypto.PAKEInitiatorRespond(c.code, initBytes)
+					if err == nil {
+						replyMsg := protocol.NewPAKEReplyMessage(replyBytes)
+						replyJSON, _ := json.Marshal(replyMsg)
+						c.writeMu.Lock()
+						_ = c.conn.WriteMessage(websocket.TextMessage, replyJSON)
+						c.writeMu.Unlock()
+
+						aead, err := crypto.NewAEAD(key)
+						if err == nil {
+							c.stateMu.Lock()
+							c.aead = aead
+							c.counter = crypto.NewNonceCounter(crypto.RoleInitiator)
+							c.validator = crypto.NewNonceValidator(crypto.RoleJoiner)
+							c.stateMu.Unlock()
+							return nil
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -264,6 +381,41 @@ func (c *Client) ReadPayload() (*protocol.InnerPayload, error) {
 								// Handshake processed, continue loop to read subsequent data frame
 								continue
 							}
+						}
+					}
+				}
+			}
+		}
+
+		if protocol.IsPAKEInitFrame(data) {
+			var pm protocol.PAKEMessage
+			if err := json.Unmarshal(data, &pm); err == nil && c.code != "" {
+				initBytes, err := pm.DecodeData()
+				if err == nil {
+					replyBytes, key, err := crypto.PAKEInitiatorRespond(c.code, initBytes)
+					if err == nil {
+						replyMsg := protocol.NewPAKEReplyMessage(replyBytes)
+						replyJSON, _ := json.Marshal(replyMsg)
+						c.writeMu.Lock()
+						_ = c.conn.WriteMessage(websocket.TextMessage, replyJSON)
+						c.writeMu.Unlock()
+
+						newAEAD, err := crypto.NewAEAD(key)
+						if err == nil {
+							c.stateMu.Lock()
+							c.aead = newAEAD
+							c.counter = crypto.NewNonceCounter(c.role)
+							expectedPeerRole := crypto.RoleJoiner
+							if c.role == crypto.RoleJoiner {
+								expectedPeerRole = crypto.RoleInitiator
+							}
+							c.validator = crypto.NewNonceValidator(expectedPeerRole)
+							c.stateMu.Unlock()
+
+							if c.OnPeerConnected != nil {
+								c.OnPeerConnected()
+							}
+							continue
 						}
 					}
 				}

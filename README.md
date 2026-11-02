@@ -7,11 +7,13 @@ End-to-End Encrypted (E2EE), zero-knowledge terminal pipe and blind WebSocket re
 `psych` provides an ephemeral, zero-knowledge message pipe between two peer nodes (`initiator` and `joiner`) mediated by an untrusted blind relay server.
 
 - **Cryptographic Primitives**:
-  - Key Agreement: X25519 (ECDH over Curve25519)
+  - Key Agreement: X25519 (ECDH over Curve25519) & SPAKE2 (PAKE over Edwards25519)
   - Key Derivation: HKDF-SHA256 (`psych-v1-session-key`)
   - Authenticated Encryption: ChaCha20-Poly1305 (RFC 8439 / AEAD)
   - Nonces: 12-byte directional nonces with monotonic 64-bit sequence counters
-- **Pairing**: `psych://pair?v=1&sid=...&relay=...&pub=...` encoded as an ANSI half-block terminal QR code.
+- **Pairing Options**:
+  - **Terminal QR Code**: `psych://pair?v=1&sid=...` rendered via ANSI Unicode half-blocks.
+  - **Short Pairing Code**: 8-character human-friendly code (e.g. `7K4M-9P2X`, Crockford Base32) authenticated via SPAKE2 PAKE with offline attack immunity.
 - **Relay**: In-memory, zero-knowledge blind WebSocket relay with max 2 peers per room, automatic teardown, and `/healthz` health checks.
 - **Piping**: Unix-pipe friendly `send` and `recv` modes for automated scripting.
 
@@ -38,7 +40,7 @@ curl http://localhost:8080/healthz
 
 ### 2. Interactive Session (Initiator)
 
-Initiates a session, prints a compact terminal QR code and fallback URI, and enters encrypted chat mode:
+Initiates a session, prints a compact terminal QR code and an 8-character pairing code:
 
 ```bash
 psych session [--relay ws://localhost:8080/ws]
@@ -46,17 +48,25 @@ psych session [--relay ws://localhost:8080/ws]
 
 ### 3. Join an Existing Session (Joiner)
 
-Connects to a session using the pairing URI or SID:
+Connect using either the **8-character short code** or full pairing URI:
 
 ```bash
-psych join <pairing-uri-or-sid> [--pub <initiator-pubkey>] [--relay <relay-url>]
+# Using 8-character short code
+psych join 7K4M-9P2X
+
+# Or using full pairing URI (enclosed in quotes)
+psych join 'psych://pair?v=1&sid=...&pub=...'
 ```
 
 ### 4. Non-Interactive Scripting / Piping
 
 **Sender piping data into a session:**
 ```bash
-echo "secret token" | psych send <pairing-uri-or-sid>
+# Pipe via 8-character code
+echo "secret token" | psych send 7K4M-9P2X
+
+# Or pipe via pairing URI
+echo "secret token" | psych send 'psych://pair?...'
 ```
 
 **Receiver dumping incoming payload to stdout:**

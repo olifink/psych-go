@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
+	"github.com/schollz/pake/v3"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 )
@@ -205,4 +207,104 @@ func GenerateSessionID() (string, error) {
 		return "", fmt.Errorf("failed to generate random session id: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+const (
+	CrockfordAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	PairingCodeLength = 8
+)
+
+// GeneratePairingCode generates an 8-character Crockford Base32 pairing code formatted as "XXXX-XXXX".
+func GeneratePairingCode() (string, error) {
+	b := make([]byte, PairingCodeLength)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", fmt.Errorf("failed to generate random pairing code: %w", err)
+	}
+
+	chars := make([]byte, PairingCodeLength)
+	for i := 0; i < PairingCodeLength; i++ {
+		chars[i] = CrockfordAlphabet[int(b[i])%len(CrockfordAlphabet)]
+	}
+
+	return fmt.Sprintf("%s-%s", string(chars[:4]), string(chars[4:])), nil
+}
+
+// NormalizePairingCode removes hyphens, spaces, uppercases, and handles common Crockford transcription errors.
+func NormalizePairingCode(code string) string {
+	s := strings.ToUpper(strings.TrimSpace(code))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.ReplaceAll(s, " ", "")
+	// Map O -> 0, I/L -> 1
+	s = strings.ReplaceAll(s, "O", "0")
+	s = strings.ReplaceAll(s, "I", "1")
+	s = strings.ReplaceAll(s, "L", "1")
+	return s
+}
+
+// IsPairingCode returns true if s matches an 8-character Crockford Base32 code.
+func IsPairingCode(s string) bool {
+	norm := NormalizePairingCode(s)
+	if len(norm) != PairingCodeLength {
+		return false
+	}
+	for i := 0; i < len(norm); i++ {
+		if !strings.ContainsRune(CrockfordAlphabet, rune(norm[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// DeriveSessionIDFromCode derives a deterministic 16-byte (32-hex) room ID from the short code.
+func DeriveSessionIDFromCode(code string) string {
+	norm := NormalizePairingCode(code)
+	h := sha256.Sum256([]byte("psych-room-v1:" + norm))
+	return hex.EncodeToString(h[:16])
+}
+
+// PAKEJoinerInit initializes Party 0 (role 0) of the PAKE exchange using the 8-character code.
+// It returns the PAKE instance and the initial message to send to the initiator.
+func PAKEJoinerInit(code string) (*pake.Pake, []byte, error) {
+	norm := NormalizePairingCode(code)
+	p, err := pake.InitCurve([]byte(norm), 0, "ed25519")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize PAKE joiner: %w", err)
+	}
+	return p, p.Bytes(), nil
+}
+
+// PAKEInitiatorRespond initializes Party 1 (role 1) of the PAKE exchange using the 8-character code,
+// updates its state with the joiner's initial message, and returns the reply message and derived session key.
+func PAKEInitiatorRespond(code string, joinerMsg []byte) ([]byte, []byte, error) {
+	norm := NormalizePairingCode(code)
+	p, err := pake.InitCurve([]byte(norm), 1, "ed25519")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize PAKE initiator: %w", err)
+	}
+	if err := p.Update(joinerMsg); err != nil {
+		return nil, nil, fmt.Errorf("PAKE initiator update failed: %w", err)
+	}
+	replyMsg := p.Bytes()
+	pakeKey, err := p.SessionKey()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to derive PAKE session key: %w", err)
+	}
+
+	sessionKey, err := DeriveSessionKey(pakeKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return replyMsg, sessionKey, nil
+}
+
+// PAKEJoinerFinalize processes the initiator's reply message and derives the session key.
+func PAKEJoinerFinalize(p *pake.Pake, initiatorReply []byte) ([]byte, error) {
+	if err := p.Update(initiatorReply); err != nil {
+		return nil, fmt.Errorf("PAKE joiner update failed: %w", err)
+	}
+	pakeKey, err := p.SessionKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive PAKE session key: %w", err)
+	}
+	return DeriveSessionKey(pakeKey)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"psych/internal/client"
@@ -101,15 +102,33 @@ func runSession(args []string) {
 	}
 }
 
+func rearrangeArgs(args []string) []string {
+	var flags []string
+	var positionals []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				flags = append(flags, args[i+1])
+				i++
+			}
+		} else {
+			positionals = append(positionals, arg)
+		}
+	}
+	return append(flags, positionals...)
+}
+
 func runJoin(args []string) {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	pub := fs.String("pub", "", "Initiator X25519 public key (hex, if passing raw SID)")
 	relayURL := fs.String("relay", defaultRelay, "WebSocket relay endpoint")
-	_ = fs.Parse(args)
+	_ = fs.Parse(rearrangeArgs(args))
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Error: missing pairing URI or session ID argument")
-		fmt.Fprintln(os.Stderr, "Usage: psych join <pairing-uri-or-sid> [--pub <initiator-pubkey>] [--relay <relay-url>]")
+		fmt.Fprintln(os.Stderr, "Error: missing pairing code, URI, or session ID argument")
+		fmt.Fprintln(os.Stderr, "Usage: psych join <code-or-uri-or-sid> [--pub <initiator-pubkey>] [--relay <relay-url>]")
 		os.Exit(1)
 	}
 
@@ -124,11 +143,11 @@ func runSend(args []string) {
 	fs := flag.NewFlagSet("send", flag.ExitOnError)
 	pub := fs.String("pub", "", "Initiator X25519 public key (hex, if passing raw SID)")
 	relayURL := fs.String("relay", defaultRelay, "WebSocket relay endpoint")
-	_ = fs.Parse(args)
+	_ = fs.Parse(rearrangeArgs(args))
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Error: missing pairing URI or session ID argument")
-		fmt.Fprintln(os.Stderr, "Usage: psych send <pairing-uri-or-sid> [--pub <initiator-pubkey>] [--relay <relay-url>]")
+		fmt.Fprintln(os.Stderr, "Error: missing pairing code, URI, or session ID argument")
+		fmt.Fprintln(os.Stderr, "Usage: psych send <code-or-uri-or-sid> [--pub <initiator-pubkey>] [--relay <relay-url>]")
 		os.Exit(1)
 	}
 

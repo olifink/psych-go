@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"psych/internal/crypto"
 )
 
 const (
@@ -18,6 +20,8 @@ const (
 	PairingHost     = "pair"
 
 	TypeHandshake = "handshake"
+	TypePAKEInit  = "pake_init"
+	TypePAKEReply = "pake_reply"
 	TypeText      = "text"
 	TypeFile      = "file"
 	TypeOAuthReq  = "oauth_req"
@@ -41,16 +45,22 @@ type PairingInfo struct {
 	Version      string `json:"v"`
 	SessionID    string `json:"sid"`
 	RelayURL     string `json:"relay"`
-	InitiatorPub string `json:"pub"`
+	InitiatorPub string `json:"pub,omitempty"`
+	Code         string `json:"code,omitempty"`
 }
 
 // BuildPairingURI formats a pairing URI matching Section 2 of PROTOCOL.md.
-func BuildPairingURI(sid string, relayURL string, initiatorPubHex string) string {
+func BuildPairingURI(sid string, relayURL string, initiatorPubHex string, code ...string) string {
 	q := url.Values{}
 	q.Set("v", ProtocolVersion)
 	q.Set("sid", strings.ToLower(sid))
 	q.Set("relay", relayURL)
-	q.Set("pub", strings.ToLower(initiatorPubHex))
+	if initiatorPubHex != "" {
+		q.Set("pub", strings.ToLower(initiatorPubHex))
+	}
+	if len(code) > 0 && code[0] != "" {
+		q.Set("code", crypto.NormalizePairingCode(code[0]))
+	}
 
 	return fmt.Sprintf("%s://%s?%s", PairingScheme, PairingHost, q.Encode())
 }
@@ -74,9 +84,10 @@ func ParsePairingURI(rawURI string) (*PairingInfo, error) {
 	sid := strings.ToLower(q.Get("sid"))
 	relayURL := q.Get("relay")
 	pub := strings.ToLower(q.Get("pub"))
+	code := crypto.NormalizePairingCode(q.Get("code"))
 
 	// Detect if parameters were truncated because of unquoted '&' in shell
-	if v == "" || sid == "" || relayURL == "" || pub == "" {
+	if v == "" || sid == "" || relayURL == "" || (pub == "" && code == "") {
 		if !strings.Contains(rawURI, "&") {
 			return nil, fmt.Errorf("%w: URI appears truncated. In bash/zsh, unquoted '&' runs commands in the background. Enclose the URI in quotes:\n  psych join '%s'", ErrInvalidPairingURI, rawURI)
 		}
@@ -94,8 +105,10 @@ func ParsePairingURI(rawURI string) (*PairingInfo, error) {
 		return nil, ErrMissingRelayEndpoint
 	}
 
-	if err := ValidatePublicKeyHex(pub); err != nil {
-		return nil, err
+	if pub != "" {
+		if err := ValidatePublicKeyHex(pub); err != nil {
+			return nil, err
+		}
 	}
 
 	return &PairingInfo{
@@ -103,13 +116,32 @@ func ParsePairingURI(rawURI string) (*PairingInfo, error) {
 		SessionID:    sid,
 		RelayURL:     relayURL,
 		InitiatorPub: pub,
+		Code:         code,
 	}, nil
 }
 
-// ResolvePairingTarget parses either a full pairing URI or a raw session ID with flag fallbacks.
+// ResolvePairingTarget parses either a full pairing URI, an 8-character pairing code, or a raw session ID with flag fallbacks.
 func ResolvePairingTarget(target string, defaultRelay string, pubFlag string) (*PairingInfo, error) {
 	trimmed := strings.TrimSpace(target)
 	trimmed = strings.Trim(trimmed, "'\"")
+
+	// 1. Check if target is a short 8-character pairing code (e.g. "7K4M-9P2X" or "7k4m9p2x")
+	if crypto.IsPairingCode(trimmed) {
+		normCode := crypto.NormalizePairingCode(trimmed)
+		sid := crypto.DeriveSessionIDFromCode(normCode)
+		relay := strings.TrimSpace(defaultRelay)
+		if relay == "" {
+			return nil, ErrMissingRelayEndpoint
+		}
+		return &PairingInfo{
+			Version:   ProtocolVersion,
+			SessionID: sid,
+			RelayURL:  relay,
+			Code:      normCode,
+		}, nil
+	}
+
+	// 2. Check if target is a full psych:// pairing URI
 	if strings.HasPrefix(trimmed, "psych://") || strings.HasPrefix(trimmed, "psych:") {
 		info, err := ParsePairingURI(trimmed)
 		if err != nil {
@@ -128,10 +160,10 @@ func ResolvePairingTarget(target string, defaultRelay string, pubFlag string) (*
 		return info, nil
 	}
 
-	// Treat as raw sid
+	// 3. Treat as raw sid
 	sid := strings.ToLower(trimmed)
 	if err := ValidateSessionID(sid); err != nil {
-		return nil, fmt.Errorf("%w: target is neither a valid psych:// URI nor a 32-character hex SID", err)
+		return nil, fmt.Errorf("%w: target is neither a valid pairing code, psych:// URI, nor 32-character hex SID", err)
 	}
 
 	pub := strings.ToLower(strings.TrimSpace(pubFlag))
@@ -199,6 +231,49 @@ func IsHandshakeFrame(data []byte) bool {
 		return true
 	}
 	return false
+}
+
+// PAKEMessage represents a PAKE key exchange JSON frame.
+type PAKEMessage struct {
+	Type string `json:"type"`
+	Data string `json:"data"` // Base64-encoded PAKE bytes
+}
+
+// NewPAKEInitMessage constructs a PAKE initiation frame.
+func NewPAKEInitMessage(rawBytes []byte) *PAKEMessage {
+	return &PAKEMessage{
+		Type: TypePAKEInit,
+		Data: base64.StdEncoding.EncodeToString(rawBytes),
+	}
+}
+
+// NewPAKEReplyMessage constructs a PAKE response frame.
+func NewPAKEReplyMessage(rawBytes []byte) *PAKEMessage {
+	return &PAKEMessage{
+		Type: TypePAKEReply,
+		Data: base64.StdEncoding.EncodeToString(rawBytes),
+	}
+}
+
+// DecodeData decodes the base64-encoded PAKE bytes.
+func (m *PAKEMessage) DecodeData() ([]byte, error) {
+	return base64.StdEncoding.DecodeString(m.Data)
+}
+
+// IsPAKEInitFrame checks if the raw JSON frame is a pake_init message.
+func IsPAKEInitFrame(data []byte) bool {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(data, &probe) == nil && probe.Type == TypePAKEInit
+}
+
+// IsPAKEReplyFrame checks if the raw JSON frame is a pake_reply message.
+func IsPAKEReplyFrame(data []byte) bool {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(data, &probe) == nil && probe.Type == TypePAKEReply
 }
 
 // WireEnvelope represents the JSON envelope for all post-handshake encrypted communication.

@@ -86,12 +86,16 @@ func RenderQRCodeHalfBlock(w io.Writer, content string) error {
 }
 
 // PrintPairingPrompt renders the terminal QR code and prints fallback pairing information to stderr.
-func PrintPairingPrompt(w io.Writer, uri string) {
+func PrintPairingPrompt(w io.Writer, uri string, code ...string) {
 	fmt.Fprintln(w, "\nScan this QR code with your peer device to connect:")
 	fmt.Fprintln(w)
 	_ = RenderQRCodeHalfBlock(w, uri)
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Or pair manually from terminal (single quotes required to prevent shell '&' splitting):")
+	if len(code) > 0 && code[0] != "" {
+		fmt.Fprintln(w, "Or pair using this short 8-character code:")
+		fmt.Fprintf(w, "  psych join %s\n\n", code[0])
+	}
+	fmt.Fprintln(w, "Or pair manually with full URI (single quotes required to prevent shell '&' splitting):")
 	fmt.Fprintf(w, "  psych join '%s'\n\n", uri)
 	fmt.Fprintf(w, "Raw URI:\n  %s\n\n", uri)
 	fmt.Fprintln(w, "Waiting for peer to connect...")

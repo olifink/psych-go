@@ -234,7 +234,7 @@ func (s *Server) readPump(room *Room, peer *Peer) {
 		} else {
 			// Rule 5: If only one peer is connected, the relay MAY buffer up to 1 handshake message;
 			// all other non-handshake frames arriving before peer arrival SHOULD be discarded.
-			if protocol.IsHandshakeFrame(data) {
+			if protocol.IsHandshakeFrame(data) || protocol.IsPAKEInitFrame(data) {
 				room.handshakeBuffer = &peerMsg{msgType: msgType, data: data}
 			}
 		}
