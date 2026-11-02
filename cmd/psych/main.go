@@ -12,13 +12,12 @@ import (
 	"psych/internal/relay"
 )
 
-const (
-	defaultRelay = "ws://127.0.0.1:8080/ws"
-	version      = "1.0.0"
-)
+const defaultRelay = "ws://127.0.0.1:8080/ws"
+
+var version = "dev"
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `PSYCH - End-to-End Encrypted Terminal Pipe & Relay (v%s)
+	fmt.Fprintf(os.Stderr, `PSYCH - End-to-End Encrypted Terminal Pipe & Relay (%s)
 
 Usage:
   psych <command> [arguments]
@@ -29,6 +28,7 @@ Commands:
   join     Connect to an existing encrypted session (Joiner)
   send     Pipe data from stdin to an encrypted session and exit
   recv     Receive a single payload and output to stdout
+  version  Display version information
 
 Run 'psych <command> --help' for details on a specific command.
 `, version)
@@ -53,6 +53,9 @@ func main() {
 		runSend(os.Args[2:])
 	case "recv":
 		runRecv(os.Args[2:])
+	case "-v", "--version", "version":
+		fmt.Printf("psych version %s\n", version)
+		os.Exit(0)
 	case "-h", "--help", "help":
 		printUsage()
 		os.Exit(0)

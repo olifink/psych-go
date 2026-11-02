@@ -19,8 +19,30 @@ End-to-End Encrypted (E2EE), zero-knowledge terminal pipe and blind WebSocket re
 
 ## Installation
 
+### Quick Install (Linux & macOS)
+
+Install the latest pre-compiled static binary via `curl`:
+
 ```bash
-go build -o psych ./cmd/psych
+curl -fsSL https://raw.githubusercontent.com/olifink/psych-go/main/install.sh | sh
+```
+
+Or install a specific version to a custom directory:
+
+```bash
+VERSION=v1.0.0 BINDIR=$HOME/.local/bin curl -fsSL https://raw.githubusercontent.com/olifink/psych-go/main/install.sh | sh
+```
+
+### Pre-built Binaries
+
+Pre-compiled static binaries for Linux, macOS, and Windows are available for each release on the [GitHub Releases](https://github.com/olifink/psych-go/releases) page.
+
+### Build from Source
+
+```bash
+git clone https://github.com/olifink/psych-go.git
+cd psych-go
+CGO_ENABLED=0 go build -ldflags="-s -w" -o psych ./cmd/psych
 ```
 
 ## CLI Usage

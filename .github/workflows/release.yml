@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Run tests
+        run: |
+          go test -v ./...
+
+      - name: Build release binaries and packages
+        id: build
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+
+          VERSION="${TAG#v}"
+          echo "Building release for version: ${VERSION} (tag: ${TAG})"
+
+          mkdir -p dist
+
+          PLATFORMS=(
+            "linux/amd64"
+            "linux/arm64"
+            "linux/arm/7"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
+          )
+
+          for PLATFORM in "${PLATFORMS[@]}"; do
+            IFS="/" read -r GOOS GOARCH GOARM <<< "${PLATFORM}"
+            ARCH_NAME="${GOARCH}"
+            if [ -n "${GOARM}" ]; then
+              ARCH_NAME="${GOARCH}v${GOARM}"
+            fi
+
+            BIN_NAME="psych"
+            PKG_EXT="tar.gz"
+            if [ "${GOOS}" = "windows" ]; then
+              BIN_NAME="psych.exe"
+              PKG_EXT="zip"
+            fi
+
+            OUTPUT_DIR="build_${GOOS}_${ARCH_NAME}"
+            mkdir -p "${OUTPUT_DIR}"
+
+            echo "==> Compiling for ${GOOS}/${ARCH_NAME}..."
+            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" GOARM="${GOARM}" \
+              go build -trimpath -ldflags="-s -w -X main.version=${TAG}" \
+              -o "${OUTPUT_DIR}/${BIN_NAME}" ./cmd/psych
+
+            cp README.md "${OUTPUT_DIR}/"
+            [ -f LICENSE ] && cp LICENSE "${OUTPUT_DIR}/"
+
+            ARCHIVE_BASE="psych_${VERSION}_${GOOS}_${ARCH_NAME}"
+            if [ "${PKG_EXT}" = "tar.gz" ]; then
+              tar -czf "dist/${ARCHIVE_BASE}.tar.gz" -C "${OUTPUT_DIR}" .
+            else
+              (cd "${OUTPUT_DIR}" && zip -qr "../../dist/${ARCHIVE_BASE}.zip" .)
+            fi
+
+            rm -rf "${OUTPUT_DIR}"
+          done
+
+          cd dist
+          sha256sum * > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.build.outputs.tag }}"
+          gh release create "${TAG}" dist/* \
+            --title "Release ${TAG}" \
+            --generate-notes
