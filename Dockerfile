@@ -2,7 +2,7 @@
 # Produces a minimal, secure, non-root container image.
 
 # --- Stage 1: Builder ---
-FROM golang:1.23-alpine AS builder
+FROM golang:alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
