@@ -21,16 +21,20 @@ End-to-End Encrypted (E2EE), zero-knowledge terminal pipe and blind WebSocket re
 
 ### Quick Install (Linux & macOS)
 
-Install the latest pre-compiled static binary via `curl`:
+Install the latest pre-compiled static binary via `curl` from GitHub or your self-hosted relay:
 
 ```bash
+# From GitHub
 curl -fsSL https://raw.githubusercontent.com/olifink/psych-go/main/install.sh | sh
+
+# Or directly from your public relay server
+curl -fsSL https://psych.lemonslice.com/install.sh | sh
 ```
 
 Or install a specific version to a custom directory:
 
 ```bash
-VERSION=v1.0.0 BINDIR=$HOME/.local/bin curl -fsSL https://raw.githubusercontent.com/olifink/psych-go/main/install.sh | sh
+VERSION=v1.0.0 BINDIR=$HOME/.local/bin curl -fsSL https://psych.lemonslice.com/install.sh | sh
 ```
 
 ### Pre-built Binaries
@@ -45,11 +49,68 @@ cd psych-go
 CGO_ENABLED=0 go build -ldflags="-s -w" -o psych ./cmd/psych
 ```
 
+## Docker Deployment (Public Relay)
+
+Run `psych server` in a minimal, unprivileged container:
+
+```bash
+docker compose up -d --build
+```
+
+Or with Docker directly:
+
+```bash
+docker build -t psych-relay .
+docker run -d --name psych-relay -p 8080:8080 --restart unless-stopped psych-relay
+```
+
+### Reverse Proxy & HTTPS (`psych.lemonslice.com`)
+
+The embedded server exposes a built-in web portal, installer endpoint, health check, and blind WebSocket relay:
+- `GET /`: Modern responsive web portal with quick-copy install commands and specs
+- `GET /install.sh`: Embedded installer script for the `psych` CLI
+- `GET /healthz`: Health status endpoint (`200 OK`)
+- `GET /ws?sid=<id>`: Bidirectional blind WebSocket relay
+
+**Caddy configuration:**
+```caddy
+psych.lemonslice.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+**Nginx configuration:**
+```nginx
+server {
+    server_name psych.lemonslice.com;
+    listen 443 ssl http2;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
 ## CLI Usage
+
+### Default Relay Environment Variable
+
+Set `PSYCH_RELAY` in your shell profile (`~/.bashrc` or `~/.zshrc`) to avoid passing `--relay` to each command:
+
+```bash
+export PSYCH_RELAY="wss://psych.lemonslice.com/ws"
+```
 
 ### 1. Relay Server
 
-Start an ephemeral blind WebSocket relay server:
+Start an ephemeral blind WebSocket relay server locally:
 
 ```bash
 psych server [--port 8080] [--host 0.0.0.0]

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -12,9 +13,17 @@ import (
 	"psych/internal/relay"
 )
 
-const defaultRelay = "ws://127.0.0.1:8080/ws"
+var (
+	defaultRelay = "ws://127.0.0.1:8080/ws"
+	version      = "dev"
+)
 
-var version = "dev"
+func getDefaultRelay() string {
+	if env := os.Getenv("PSYCH_RELAY"); env != "" {
+		return env
+	}
+	return defaultRelay
+}
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `PSYCH - End-to-End Encrypted Terminal Pipe & Relay (%s)
@@ -30,8 +39,13 @@ Commands:
   recv     Receive a single payload and output to stdout
   version  Display version information
 
+Environment Variables:
+  PSYCH_RELAY   Default WebSocket relay URL (overrides default %s)
+  PORT          Default port for relay server (default: 8080)
+  HOST          Default bind host for relay server (default: 0.0.0.0)
+
 Run 'psych <command> --help' for details on a specific command.
-`, version)
+`, version, defaultRelay)
 }
 
 func main() {
@@ -68,8 +82,19 @@ func main() {
 
 func runServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
-	host := fs.String("host", "0.0.0.0", "Bind address for relay server")
-	port := fs.Int("port", 8080, "Port for relay server")
+	defaultHost := "0.0.0.0"
+	if envHost := os.Getenv("HOST"); envHost != "" {
+		defaultHost = envHost
+	}
+	defaultPort := 8080
+	if envPort := os.Getenv("PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
+			defaultPort = p
+		}
+	}
+
+	host := fs.String("host", defaultHost, "Bind address for relay server (or set HOST)")
+	port := fs.Int("port", defaultPort, "Port for relay server (or set PORT)")
 	_ = fs.Parse(args)
 
 	srv := relay.NewServer()
@@ -85,8 +110,10 @@ func runServer(args []string) {
 	}()
 
 	fmt.Fprintf(os.Stderr, "Starting PSYCH relay on %s:%d\n", *host, *port)
-	fmt.Fprintf(os.Stderr, "WebSocket endpoint: ws://%s:%d/ws?sid=<sid>\n", *host, *port)
-	fmt.Fprintf(os.Stderr, "Health check endpoint: http://%s:%d/healthz\n", *host, *port)
+	fmt.Fprintf(os.Stderr, "Web portal:       http://%s:%d/\n", *host, *port)
+	fmt.Fprintf(os.Stderr, "Install script:   http://%s:%d/install.sh\n", *host, *port)
+	fmt.Fprintf(os.Stderr, "WebSocket:        ws://%s:%d/ws?sid=<sid>\n", *host, *port)
+	fmt.Fprintf(os.Stderr, "Health check:     http://%s:%d/healthz\n", *host, *port)
 
 	if err := srv.Start(*host, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "Relay server failed: %v\n", err)
@@ -96,7 +123,7 @@ func runServer(args []string) {
 
 func runSession(args []string) {
 	fs := flag.NewFlagSet("session", flag.ExitOnError)
-	relayURL := fs.String("relay", defaultRelay, "WebSocket relay endpoint")
+	relayURL := fs.String("relay", getDefaultRelay(), "WebSocket relay endpoint (or set PSYCH_RELAY)")
 	_ = fs.Parse(args)
 
 	if err := client.StartInitiatorSession(*relayURL, os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -126,7 +153,7 @@ func rearrangeArgs(args []string) []string {
 func runJoin(args []string) {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	pub := fs.String("pub", "", "Initiator X25519 public key (hex, if passing raw SID)")
-	relayURL := fs.String("relay", defaultRelay, "WebSocket relay endpoint")
+	relayURL := fs.String("relay", getDefaultRelay(), "WebSocket relay endpoint (or set PSYCH_RELAY)")
 	_ = fs.Parse(rearrangeArgs(args))
 
 	if fs.NArg() < 1 {
@@ -145,7 +172,7 @@ func runJoin(args []string) {
 func runSend(args []string) {
 	fs := flag.NewFlagSet("send", flag.ExitOnError)
 	pub := fs.String("pub", "", "Initiator X25519 public key (hex, if passing raw SID)")
-	relayURL := fs.String("relay", defaultRelay, "WebSocket relay endpoint")
+	relayURL := fs.String("relay", getDefaultRelay(), "WebSocket relay endpoint (or set PSYCH_RELAY)")
 	_ = fs.Parse(rearrangeArgs(args))
 
 	if fs.NArg() < 1 {
@@ -163,7 +190,7 @@ func runSend(args []string) {
 
 func runRecv(args []string) {
 	fs := flag.NewFlagSet("recv", flag.ExitOnError)
-	relayURL := fs.String("relay", defaultRelay, "WebSocket relay endpoint")
+	relayURL := fs.String("relay", getDefaultRelay(), "WebSocket relay endpoint (or set PSYCH_RELAY)")
 	_ = fs.Parse(args)
 
 	if err := client.RunRecv(*relayURL, os.Stdout, os.Stderr); err != nil {

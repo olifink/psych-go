@@ -2,15 +2,23 @@ package relay
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"psych/internal/protocol"
 )
+
+//go:embed static/install.sh
+var embeddedInstallScript []byte
+
+//go:embed static/index.html
+var embeddedIndexHTML []byte
 
 const (
 	writeWait      = 10 * time.Second
@@ -75,18 +83,64 @@ func NewServer() *Server {
 		ReadBufferSize:  64 * 1024,
 		WriteBufferSize: 64 * 1024,
 		CheckOrigin: func(r *http.Request) bool {
-			return true // Allow all origins for zero-knowledge CLI/Droid pairing
+			return true // Allow all origins for zero-knowledge CLI/reverse proxy pairing
 		},
 	}
 	return s
 }
 
-// Handler returns the HTTP handler exposing /healthz and /ws.
+// Handler returns the HTTP handler exposing /, /install.sh, /healthz, and /ws.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.HandleFunc("/install.sh", s.handleInstallScript)
+	mux.HandleFunc("/install", s.handleInstallScript)
+	mux.HandleFunc("/", s.handleIndex)
 	return mux
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Determine host and scheme (supporting reverse proxy headers like X-Forwarded-Proto)
+	host := r.Host
+	scheme := "https"
+	wsScheme := "wss"
+
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "http" || (proto == "" && r.TLS == nil && (strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1"))) {
+		scheme = "http"
+		wsScheme = "ws"
+	}
+
+	baseURL := fmt.Sprintf("%s://%s", scheme, host)
+	relayURL := fmt.Sprintf("%s://%s/ws", wsScheme, host)
+
+	page := strings.ReplaceAll(string(embeddedIndexHTML), "{{.BaseURL}}", baseURL)
+	page = strings.ReplaceAll(page, "{{.RelayURL}}", relayURL)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(page))
+}
+
+func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(embeddedInstallScript)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

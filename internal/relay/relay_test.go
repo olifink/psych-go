@@ -1,9 +1,11 @@
 package relay
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -169,5 +171,77 @@ func TestRelayRoomCleanupOnDisconnect(t *testing.T) {
 
 	if srv.RoomCount() != 0 {
 		t.Fatalf("expected 0 active rooms after both disconnected, got %d", srv.RoomCount())
+	}
+}
+
+func TestLandingPageServing(t *testing.T) {
+	srv := NewServer()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "psych.lemonslice.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d", rec.Code)
+	}
+	contentType := rec.Header().Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Fatalf("expected text/html, got %s", contentType)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "PSYCH") {
+		t.Fatalf("expected body to contain 'PSYCH'")
+	}
+	if !strings.Contains(body, "https://psych.lemonslice.com/install.sh") {
+		t.Fatalf("expected body to contain replaced BaseURL, got:\n%s", body)
+	}
+	if !strings.Contains(body, "wss://psych.lemonslice.com/ws") {
+		t.Fatalf("expected body to contain replaced RelayURL, got:\n%s", body)
+	}
+}
+
+func TestInstallScriptServing(t *testing.T) {
+	srv := NewServer()
+
+	for _, path := range []string{"/install.sh", "/install"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("path %s: expected status 200 OK, got %d", path, rec.Code)
+		}
+		contentType := rec.Header().Get("Content-Type")
+		if !strings.Contains(contentType, "text/x-shellscript") {
+			t.Fatalf("path %s: expected text/x-shellscript, got %s", path, contentType)
+		}
+		if !strings.Contains(rec.Body.String(), "PSYCH installer script") {
+			t.Fatalf("path %s: expected body to contain installer header", path)
+		}
+	}
+}
+
+func TestNotFound(t *testing.T) {
+	srv := NewServer()
+	req := httptest.NewRequest(http.MethodGet, "/unknown-page", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404 Not Found, got %d", rec.Code)
+	}
+}
+
+func TestEmbeddedInstallScriptMatchesRoot(t *testing.T) {
+	rootScript, err := os.ReadFile("../../install.sh")
+	if err != nil {
+		t.Skipf("cannot read ../../install.sh: %v", err)
+	}
+	if !bytes.Equal(rootScript, embeddedInstallScript) {
+		t.Fatalf("embedded static/install.sh does not match root install.sh")
 	}
 }

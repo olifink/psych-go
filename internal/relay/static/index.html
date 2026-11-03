@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PSYCH - End-to-End Encrypted Terminal Pipe & Relay</title>
+  <meta name="description" content="Ephemeral, zero-knowledge message pipe between peers mediated by an untrusted blind WebSocket relay.">
+  <style>
+    :root {
+      --bg: #090d13;
+      --card-bg: #121824;
+      --code-bg: #06090e;
+      --border: #212c3d;
+      --border-focus: #388bfd;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent-green: #3fb950;
+      --accent-cyan: #58a6ff;
+      --accent-purple: #bc8cff;
+      --accent-yellow: #d29922;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      padding: 2.5rem 1.25rem;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 860px;
+    }
+
+    header {
+      margin-bottom: 2.5rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 2rem;
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .logo-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    h1 {
+      font-family: var(--font-mono);
+      font-size: 2.25rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .tag-e2ee {
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(63, 185, 80, 0.12);
+      border: 1px solid rgba(63, 185, 80, 0.25);
+      color: var(--accent-green);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      padding: 0.35rem 0.85rem;
+      border-radius: 999px;
+      font-weight: 500;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      background-color: var(--accent-green);
+      border-radius: 50%;
+      box-shadow: 0 0 10px var(--accent-green);
+      animation: pulse 2.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    .lead {
+      color: var(--text-muted);
+      font-size: 1.125rem;
+      max-width: 680px;
+    }
+
+    .guarantee-bar {
+      margin-top: 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    .badge-chip {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      font-size: 0.8rem;
+      font-family: var(--font-mono);
+      color: var(--text-muted);
+      padding: 0.25rem 0.65rem;
+      border-radius: 6px;
+    }
+
+    .badge-chip strong {
+      color: var(--text);
+    }
+
+    section {
+      margin-bottom: 2.25rem;
+    }
+
+    h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: #ffffff;
+    }
+
+    h2::before {
+      content: "#";
+      color: var(--accent-cyan);
+      font-family: var(--font-mono);
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .code-box {
+      position: relative;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin: 0.75rem 0;
+      overflow: hidden;
+    }
+
+    .code-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.02);
+      border-bottom: 1px solid var(--border);
+      padding: 0.4rem 0.85rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    pre {
+      padding: 1rem;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      line-height: 1.5;
+      color: #f0f6fc;
+    }
+
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.88em;
+    }
+
+    .copy-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      padding: 0.25rem 0.65rem;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .copy-btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: var(--border-focus);
+      color: #ffffff;
+    }
+
+    .copy-btn.copied {
+      background: rgba(63, 185, 80, 0.2);
+      border-color: var(--accent-green);
+      color: var(--accent-green);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.25rem;
+    }
+
+    @media (max-width: 680px) {
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .step-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .step-num {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      line-height: 24px;
+      text-align: center;
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-cyan);
+      border-radius: 50%;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      font-weight: bold;
+      margin-bottom: 0.5rem;
+    }
+
+    .step-title {
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+      color: #ffffff;
+    }
+
+    .step-desc {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      margin-bottom: 0.75rem;
+      flex-grow: 1;
+    }
+
+    .specs-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+      margin-top: 0.5rem;
+    }
+
+    .specs-table th, .specs-table td {
+      text-align: left;
+      padding: 0.65rem 0.85rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .specs-table th {
+      color: var(--text-muted);
+      font-weight: 600;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .specs-table td:first-child {
+      font-family: var(--font-mono);
+      color: var(--accent-cyan);
+      font-weight: 500;
+      width: 35%;
+    }
+
+    footer {
+      margin-top: auto;
+      border-top: 1px solid var(--border);
+      padding-top: 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    footer a {
+      color: var(--accent-cyan);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    .env-tip {
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .env-tip code {
+      color: var(--accent-yellow);
+      background: rgba(210, 153, 34, 0.1);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-top">
+        <div class="logo-badge">
+          <h1>PSYCH</h1>
+          <span class="tag-e2ee">E2EE Terminal Pipe</span>
+        </div>
+        <div class="status-pill" id="relay-status">
+          <span class="status-dot"></span>
+          <span id="status-text">Relay Online</span>
+        </div>
+      </div>
+      <p class="lead">
+        Zero-knowledge, peer-to-peer authenticated message pipe mediated by an in-memory blind WebSocket relay.
+      </p>
+      <div class="guarantee-bar">
+        <div class="badge-chip">Relay: <strong>Blind & Ephemeral</strong></div>
+        <div class="badge-chip">Crypto: <strong>X25519 & SPAKE2 PAKE</strong></div>
+        <div class="badge-chip">AEAD: <strong>ChaCha20-Poly1305</strong></div>
+        <div class="badge-chip">Persistence: <strong>None (RAM-Only)</strong></div>
+      </div>
+    </header>
+
+    <!-- SECTION: INSTALL -->
+    <section>
+      <h2>Quick Install</h2>
+      <div class="card">
+        <p style="font-size: 0.95rem; margin-bottom: 0.5rem;">
+          Install the pre-compiled static binary on Linux, macOS, or Raspberry Pi directly from this server:
+        </p>
+        <div class="code-box">
+          <div class="code-header">
+            <span>Terminal Shell</span>
+            <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+          </div>
+          <pre><code>curl -fsSL {{.BaseURL}}/install.sh | sh</code></pre>
+        </div>
+        <div class="env-tip">
+          Tip: Set <code>export PSYCH_RELAY="{{.RelayURL}}"</code> in your shell profile to avoid passing <code>--relay</code> each time.
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION: USAGE -->
+    <section>
+      <h2>Usage & Pairing</h2>
+      <div class="grid-2">
+        <div class="step-card">
+          <span class="step-num">1</span>
+          <div class="step-title">Start a Session</div>
+          <div class="step-desc">
+            Initiates an encrypted room, prints a compact terminal QR code and an 8-character human code.
+          </div>
+          <div class="code-box">
+            <div class="code-header">
+              <span>Host Machine</span>
+              <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+            </div>
+            <pre><code>psych session --relay {{.RelayURL}}</code></pre>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <span class="step-num">2</span>
+          <div class="step-title">Join via Short Code</div>
+          <div class="step-desc">
+            Pairs securely using SPAKE2 PAKE. Blind to the relay and completely immune to offline dictionary attacks.
+          </div>
+          <div class="code-box">
+            <div class="code-header">
+              <span>Peer Machine</span>
+              <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+            </div>
+            <pre><code>psych join 7K4M-9P2X --relay {{.RelayURL}}</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top: 1.25rem;">
+        <div class="step-title" style="margin-bottom: 0.5rem;">Unix Pipeline Integration</div>
+        <p style="font-size: 0.88rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+          Pipe arbitrary streams or file payloads directly between decoupled systems over standard input and output:
+        </p>
+        <div class="code-box">
+          <div class="code-header">
+            <span>Send Data (Producer)</span>
+            <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+          </div>
+          <pre><code>echo "top secret token" | psych send 7K4M-9P2X --relay {{.RelayURL}}</code></pre>
+        </div>
+        <div class="code-box">
+          <div class="code-header">
+            <span>Receive Data (Consumer)</span>
+            <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+          </div>
+          <pre><code>psych recv --relay {{.RelayURL}} > received_payload.txt</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION: SPECIFICATIONS -->
+    <section>
+      <h2>Security & Architecture</h2>
+      <div class="card">
+        <table class="specs-table">
+          <thead>
+            <tr>
+              <th>Component</th>
+              <th>Specification</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Key Agreement</td>
+              <td>X25519 (ECDH) & SPAKE2 (PAKE on Ed25519)</td>
+            </tr>
+            <tr>
+              <td>Key Derivation</td>
+              <td>HKDF-SHA256 (<code>psych-v1-session-key</code>)</td>
+            </tr>
+            <tr>
+              <td>Authenticated Encryption</td>
+              <td>ChaCha20-Poly1305 (RFC 8439 AEAD)</td>
+            </tr>
+            <tr>
+              <td>Directional Nonces</td>
+              <td>12 bytes (1-byte direction bit + 3-byte zeros + 8-byte monotonic counter)</td>
+            </tr>
+            <tr>
+              <td>Relay Protocol</td>
+              <td>Blind WebSocket message forwarder; maximum 2 peers per room; zero disk storage</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SECTION: ENDPOINTS -->
+    <section>
+      <h2>Relay Endpoints</h2>
+      <div class="card">
+        <table class="specs-table">
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>GET /</td>
+              <td>Service overview and web portal</td>
+            </tr>
+            <tr>
+              <td>GET /install.sh</td>
+              <td>Embedded shell installer for <code>psych</code> CLI</td>
+            </tr>
+            <tr>
+              <td>GET /healthz</td>
+              <td>Health check endpoint (returns HTTP 200 <code>OK</code>)</td>
+            </tr>
+            <tr>
+              <td>GET /ws?sid=&lt;id&gt;</td>
+              <td>Blind bidirectional WebSocket room endpoint</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <div>PSYCH Relay &bull; <a href="/healthz">Health Status</a> &bull; <a href="/install.sh">install.sh</a></div>
+      <div>Source: <a href="https://github.com/olifink/psych-go" target="_blank" rel="noopener">github.com/olifink/psych-go</a></div>
+    </footer>
+  </div>
+
+  <script>
+    function copySnippet(btn) {
+      const codeBlock = btn.closest('.code-box').querySelector('pre code');
+      if (!codeBlock) return;
+      navigator.clipboard.writeText(codeBlock.innerText.trim()).then(() => {
+        const originalText = btn.innerText;
+        btn.innerText = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.innerText = originalText;
+          btn.classList.remove('copied');
+        }, 2000);
+      });
+    }
+
+    // Dynamic health check
+    (function checkHealth() {
+      fetch('/healthz')
+        .then(res => {
+          if (res.ok) {
+            document.getElementById('status-text').innerText = 'Relay Online';
+          } else {
+            document.getElementById('status-text').innerText = 'Degraded';
+          }
+        })
+        .catch(() => {
+          document.getElementById('status-text').innerText = 'Unreachable';
+        });
+    })();
+  </script>
+</body>
+</html>
