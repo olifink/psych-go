@@ -2,7 +2,7 @@
 # Produces a minimal, secure, non-root container image.
 
 # --- Stage 1: Builder ---
-FROM golang:alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -15,9 +15,11 @@ COPY vendor/ ./vendor/
 # Copy full source tree
 COPY . .
 
-# Build static binary
+# Build static binary (supporting cross-compilation via Buildx TARGETOS / TARGETARCH)
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=1.0.0
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X main.version=v${VERSION}" \
     -o /bin/psych ./cmd/psych
 

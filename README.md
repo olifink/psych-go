@@ -51,13 +51,42 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o psych ./cmd/psych
 
 ## Docker Deployment (Public Relay)
 
-Run `psych server` in a minimal, unprivileged container:
+Pre-built multi-architecture container images (`linux/amd64` and `linux/arm64`) are automatically published to the **GitHub Container Registry (GHCR)** on every release tag.
+
+### 1. Run directly from GHCR
 
 ```bash
-docker compose up -d --build
+# Pull and run the latest release image
+docker run -d \
+  --name psych-relay \
+  -p 8080:8080 \
+  --restart unless-stopped \
+  ghcr.io/olifink/psych-go:latest
 ```
 
-Or with Docker directly:
+Or run a specific release version:
+
+```bash
+docker run -d \
+  --name psych-relay \
+  -p 8080:8080 \
+  --restart unless-stopped \
+  ghcr.io/olifink/psych-go:v1.0.0
+```
+
+> **Note on Private Repositories**: If your repository or packages are private, authenticate Docker with a GitHub token (`read:packages` scope) before pulling:
+> ```bash
+> echo "$GITHUB_TOKEN" | docker login ghcr.io -u <GITHUB_USERNAME> --password-stdin
+> ```
+
+### 2. Run with Docker Compose
+
+```bash
+# Runs the pre-built GHCR image (or builds locally if --build is passed)
+docker compose up -d
+```
+
+### 3. Build Locally
 
 ```bash
 docker build -t psych-relay .

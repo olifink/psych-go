@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -105,6 +106,7 @@ jobs:
           cat checksums.txt
 
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         env:
@@ -114,3 +116,43 @@ jobs:
           gh release create "${TAG}" dist/* \
             --title "Release ${TAG}" \
             --generate-notes
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine Docker tags
+        id: docker_tags
+        run: |
+          REPO="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAG="${{ steps.build.outputs.tag }}"
+          VERSION="${{ steps.build.outputs.version }}"
+          TAGS="${REPO}:${TAG},${REPO}:${VERSION},${REPO}:latest"
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Build and push multi-arch Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.docker_tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=PSYCH Relay
+            org.opencontainers.image.description=End-to-End Encrypted Terminal Pipe & Blind WebSocket Relay
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.build.outputs.tag }}
+          build-args: |
+            VERSION=${{ steps.build.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

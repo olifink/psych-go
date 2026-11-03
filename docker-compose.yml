@@ -30,10 +30,10 @@
 
 services:
   psych-relay:
+    image: ghcr.io/olifink/psych-go:latest
     build:
       context: .
       dockerfile: Dockerfile
-    image: psych-relay:latest
     container_name: psych-relay
     restart: unless-stopped
     ports:
